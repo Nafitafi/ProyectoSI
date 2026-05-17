@@ -11,6 +11,17 @@ import datetime
 import socket
 import threading
 import logging
+import rsa
+
+HOST = "0.0.0.0"
+PORT = 5000
+
+"""Genera un par de claves RSA para el servidor, esto se hace al inicio para que el servidor tenga su propia clave publica y privada
+que se usara para cifrar mensajes privados enviados a los clientes, el proceso de generacion de claves puede tardar unos segundos, por eso 
+se muestra un mensaje informando al usuario, una vez generadas se confirma que se han generado con exito"""
+logging.info("Generando llaves RSA del servidor... (esto puede tardar unos segundos)")
+SERVER_PUB_KEY, SERVER_PRIV_KEY = rsa.newkeys(2048)
+logging.info("Llaves generadas con éxito.")
 
 
 """Set up del logging para registrar eventos importantes del servidor, 
@@ -25,15 +36,12 @@ logging.basicConfig(
     ]
 )
 
-HOST = "0.0.0.0"
-PORT = 5000
-
 """se usa UN diccionario para almacenar los clientes conectados, donde la clave es el nombre de usuario
 y el valor es el objeto de conexion del socket al que corresponde ese usuario PERMITIENDO enviar mensajes
 a cualquier cliente usando solo su nombre.
 threading.lock() funciona como un semaforo evitando problemas cuando varios hilos intentan acceder o modificar
 el diccionario al mismo tiempo"""
-clientes = {}          
+clientes = {} # guardar {nombre: {"conn": conn, "pubkey": llave_publica}            
 lock = threading.Lock()
 
 
@@ -46,12 +54,12 @@ def broadcast(mensaje, remitente=None):
     se usa un bloque try-catch por si falla un envio, continua con el siguiente cliente
     """
 
-    for nombre, conn in clientes.items():
+    for nombre, datos_cliente in clientes.items(): 
         if nombre != remitente:
             try:
-                conn.sendall(mensaje.encode())
+                mensaje_cifrado = rsa.encrypt(mensaje.encode('utf-8'), datos_cliente['pubkey']) #cifra el mensaje usando la clave publica del cliente destino
+                datos_cliente['conn'].sendall(mensaje_cifrado)
             except Exception as e:
-                # Registramos si falla el envío a un usuario en particular
                 logging.warning(f"Fallo al enviar mensaje a '{nombre}': {e}")
 
 
@@ -61,9 +69,23 @@ def manejarCliente(conn, addr):
     elimina al cliente de la lista y avisa a los demas. Conn es el socket del cliente y addr es su direccion"""
     nombre = None #hasta que el cliente se registre no hay nombre
     try:
-        conn.sendall(b"Usuario: ")
-        nombre = conn.recv(1024).decode().strip() #recibe el nombre de usuario del cliente
+        
+        # HandShake criptográfico para intercambio de claves y nombre de usuario
+        conn.sendall(SERVER_PUB_KEY.save_pkcs1()) #envia la clave publica del servidor al cliente para que pueda cifrar mensajes privados para el servidor
+        
+        # Recibir llave pública del cliente
+        client_pub_pem = conn.recv(2048) #recibe la clave publica del cliente en formato PEM
+        client_pub_key = rsa.PublicKey.load_pkcs1(client_pub_pem) #carga la clave publica del cliente para usarla en el cifrado de mensajes privados enviados a ese cliente
+        
+        # Pedir el usuario, para enviar el prompt cifrado con la llave del cliente
+        prompt_cifrado = rsa.encrypt(b"Usuario: ", client_pub_key) #cifra el prompt usando la clave publica del cliente para que solo el cliente pueda descifrarlo
+        conn.sendall(prompt_cifrado) #envia el prompt cifrado al cliente para solicitar el nombre de usuario
 
+        # 4. Recibir el nombre de usuario (viene cifrado por el cliente) y descifrarlo
+        nombre_cifrado = conn.recv(2048) #recibe el nombre cifrado por el cliente
+        # descifra el nombre usando la clave privada del servidor y lo decodifica a string, ademas se le quitan espacios en blanco al inicio y final por si el cliente los ingreso por error
+        nombre = rsa.decrypt(nombre_cifrado, SERVER_PRIV_KEY).decode('utf-8').strip() 
+        
         with lock:
             """with lock bloquea el acceso para evitar conflictos entre los hilos, despues se verifica
             si el nombre ingresado ya existe, si es asi se envia un error y se cierra la conexion,
@@ -81,16 +103,19 @@ def manejarCliente(conn, addr):
                 conn.close()
                 return
 
-            # Registrar cliente
-            clientes[nombre] = conn
+            # Agregar cliente al diccionario con su conexión y clave pública
+            clientes[nombre] = {"conn": conn, "pubkey": client_pub_key}
 
             # Enviar al nuevo cliente la lista de usuarios ya conectados
             for user in clientes:
                 if user != nombre:
                     try:
-                        conn.sendall(f"SISTEMA_ADD:{user}\n".encode())
+                        msg_sistema = f"SISTEMA_ADD:{user}\n"
+                        msg_cifrado = rsa.encrypt(msg_sistema.encode('utf-8'), client_pub_key)
+                        conn.sendall(msg_cifrado)
                     except:
                         pass
+                    
         # Registramos la conexión exitosa del nuevo usuario
         logging.info(f"Usuario '{nombre}' conectado desde {addr}") 
 
@@ -104,11 +129,12 @@ def manejarCliente(conn, addr):
         while True:
             """Bucle principal para recibir mensajes del cliente, espera mensajes del cliengte y si
             el mensaje esta vacio significa que se desconecto, si hay algun error al recibir, se sale del ciclo"""
-            msg = conn.recv(1024).decode()
-            if not msg:
+            msg_cifrado = conn.recv(2048)
+            if not msg_cifrado:
                 break
 
-            msg = msg.strip() #elimina espacios en blanco al inicio y final
+            # Descifrar el mensaje usando la clave privada del servidor y decodificarlo a string, ademas se le quitan espacios en blanco al inicio y final por si el cliente los ingreso por error
+            msg = rsa.decrypt(msg_cifrado, SERVER_PRIV_KEY).decode('utf-8').strip()
 
             """identifica cel comando del mensaje que es privado, despues separa el destinario y el mensaje
             y por ultimo reconstruye el mensaje completo. Se verifica si el destino existe, envia el mensaje, 
@@ -116,17 +142,22 @@ def manejarCliente(conn, addr):
             
             fecha = datetime.datetime.now().strftime("%d/%m/%Y %I:%M:%S %p")
             if msg.startswith("/priv"):
-                _, destino, *contenido = msg.split() #separa el comando, destinario y mensaje (descompone el mensaje en partes)
-                contenido = " ".join(contenido) #toma el resto del mensaje y lo une en una sola cadena para obtener el mensaje completo de forma legible para el usuario
+                _, destino, *contenido = msg.split()
+                contenido = " ".join(contenido)
 
                 if destino in clientes:
-                    """envia el mensaje privado al destinario y la confirmacion al remitente con la fecha/hora"""
-                    clientes[destino].sendall(f"[{fecha}] [PRIVADO de {nombre}] {contenido}\n".encode()) #al recibir el destino se envia el mensaje al cliente correspondiente
-                    conn.sendall(f"[PRIVADO para {destino}] [Fecha:{fecha}] {contenido}\n".encode()) #confirma al remitente que se envio el mensaje para que sepa que fue exitoso
-                    logging.info(f"Mensaje privado de '{nombre}' a '{destino}': {contenido}") #registramos el mensaje privado en la bitacora
+                    destino_pubkey = clientes[destino]['pubkey'] #obtiene la clave publica del cliente destino para cifrar el mensaje privado
+                    msg_para_destino = f"[{fecha}] [PRIVADO de {nombre}] {contenido}\n" #mensaje que recibira el cliente destino, incluye la fecha, el nombre del remitente y el mensaje
+                    clientes[destino]['conn'].sendall(rsa.encrypt(msg_para_destino.encode('utf-8'), destino_pubkey)) #envia el mensaje cifrado al cliente destino usando su clave publica para que solo el cliente destino pueda descifrarlo
+                    
+                    msg_para_remitente = f"[PRIVADO para {destino}] [Fecha:{fecha}] {contenido}\n" 
+                    conn.sendall(rsa.encrypt(msg_para_remitente.encode('utf-8'), client_pub_key)) #envia la confirmacion al remitente cifrada con su clave publica para que solo el remitente pueda descifrarla
+                    
+                    logging.info(f"Mensaje privado de '{nombre}' a '{destino}': ***Cifrado***") #registramos el evento del mensaje privado sin guardar el contenido por seguridad
                 else:
-                    conn.sendall(b"ERROR: Usuario no encontrado\n")
-                    logging.warning(f"Intento de mensaje privado a '{destino}' fallido desde {addr}")
+                    err = rsa.encrypt(b"ERROR: Usuario no encontrado\n", client_pub_key) #cifra el mensaje de error usando la clave publica del remitente para que solo el remitente pueda descifrarlo
+                    conn.sendall(err) #envia el mensaje de error al remitente
+                    logging.warning(f"Intento de mensaje privado a '{destino}' fallido desde '{nombre}': Usuario no encontrado") #registramos el intento fallido de mensaje privado por usuario no encontrado
                 continue
 
             """envia mensajes grupales a todos los clientes conectados con la fecha/hora actual"""    
