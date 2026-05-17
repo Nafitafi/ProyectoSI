@@ -23,30 +23,21 @@ def limpiar():
 
 def menu_principal():
     """
-    Muestra el menú principal para seleccionar el tipo de cliente a ejecutar TCP O UDP 
-    o salir del programa
+    Muestra el menú principal para ejecutar el cliente TCP o salir.
     """
     while True:
         limpiar()
-        print("SELECCIONA UN SERVIDOR")
-        print("1. Cliente TCP")
-        print("2. Cliente UDP")
-        print("3. Salir\n")
-        """
-        pide al usuario que elija una opción del menú y quita espacio en blanco
-        """
+        print("SELECCIONA UNA OPCIÓN")
+        print("1. Iniciar Cliente TCP (Terminal)")
+        print("2. Salir\n")
+        
         opcion = input("Elige una opción: ").strip()
 
         if opcion == "1":
             ejecutar_cliente("cliente_tcp.py")
-
         elif opcion == "2":
-            ejecutar_cliente("cliente_udp.py")
-
-        elif opcion == "3":
             print("Saliendo del programa")
             sys.exit(0)
-
         else:
             input("Opción inválida. Presiona ENTER para continuar")
 

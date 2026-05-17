@@ -10,6 +10,20 @@ y threading para atender a los clientes de manera simultanea
 import datetime
 import socket
 import threading
+import logging
+
+
+"""Set up del logging para registrar eventos importantes del servidor, 
+como conexiones, desconexiones y errores, en un archivo de texto llamado 
+'bitacora_servidor.log' y también imprimirlos en la consola."""
+logging.basicConfig(
+    level=logging.INFO, # Nivel mínimo a registrar. 
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bitacora_servidor.log", encoding='utf-8'), # Escribe en el archivo
+        logging.StreamHandler() # Imprime en la consola al mismo tiempo
+    ]
+)
 
 HOST = "0.0.0.0"
 PORT = 5000
@@ -36,8 +50,9 @@ def broadcast(mensaje, remitente=None):
         if nombre != remitente:
             try:
                 conn.sendall(mensaje.encode())
-            except:
-                pass
+            except Exception as e:
+                # Registramos si falla el envío a un usuario en particular
+                logging.warning(f"Fallo al enviar mensaje a '{nombre}': {e}")
 
 
 def manejarCliente(conn, addr):
@@ -61,6 +76,8 @@ def manejarCliente(conn, addr):
 
             if nombre in clientes:
                 conn.sendall(b"ERROR: Usuario ya existe\n")
+                # Registramos el intento de conexión con un nombre ya existente
+                logging.warning(f"Conexión rechazada desde {addr}: El nombre '{nombre}' ya está en uso.")
                 conn.close()
                 return
 
@@ -74,6 +91,8 @@ def manejarCliente(conn, addr):
                         conn.sendall(f"SISTEMA_ADD:{user}\n".encode())
                     except:
                         pass
+        # Registramos la conexión exitosa del nuevo usuario
+        logging.info(f"Usuario '{nombre}' conectado desde {addr}") 
 
         """Muestra el servidor de quien se conecto y avisa a todos los clientes que alguien nuevo entro"""
         print(f"[TCP] {nombre} conectado desde {addr}")
@@ -104,15 +123,20 @@ def manejarCliente(conn, addr):
                     """envia el mensaje privado al destinario y la confirmacion al remitente con la fecha/hora"""
                     clientes[destino].sendall(f"[{fecha}] [PRIVADO de {nombre}] {contenido}\n".encode()) #al recibir el destino se envia el mensaje al cliente correspondiente
                     conn.sendall(f"[PRIVADO para {destino}] [Fecha:{fecha}] {contenido}\n".encode()) #confirma al remitente que se envio el mensaje para que sepa que fue exitoso
+                    logging.info(f"Mensaje privado de '{nombre}' a '{destino}': {contenido}") #registramos el mensaje privado en la bitacora
                 else:
                     conn.sendall(b"ERROR: Usuario no encontrado\n")
+                    logging.warning(f"Intento de mensaje privado a '{destino}' fallido desde {addr}")
                 continue
 
             """envia mensajes grupales a todos los clientes conectados con la fecha/hora actual"""    
             broadcast(f"[{nombre}] [Fecha:{fecha}] {msg}\n", remitente=nombre)
 
-    except:
-        pass
+    except Exception as e:
+        if nombre:
+            logging.error(f"Error en la conexión con el cliente '{nombre}': {e}")
+        else:
+            logging.error(f"Error en la conexión con {addr}: {e}")
    
     finally:
         # Eliminar cliente y notificar a los demas
@@ -121,9 +145,11 @@ def manejarCliente(conn, addr):
                 del clientes[nombre] #elimina al cliente del diccionario
 
         # Notificar evento de sistema y mensaje legible
-        broadcast(f"SISTEMA_DEL:{nombre}\n")
-        broadcast(f"*** {nombre} salio del chat ***\n")
-        print(f"[TCP] {nombre} desconectado")
+        if nombre:
+            broadcast(f"SISTEMA_DEL:{nombre}\n")
+            broadcast(f"*** {nombre} salio del chat ***\n")
+            # Log de desconexión
+            logging.info(f"Usuario '{nombre}' desconectado")
         conn.close()
 
 """este metodo esta declarado al final ya que primero se definen las funciones que maneja el servidor por si pasa algun error asegurandonos que 
@@ -139,7 +165,8 @@ def main():
     
     server.settimeout(1) #establece un tiempo de espera para aceptar conexiones, permitiendo manejar interrupciones para que el servidor pueda cerrarse limpiamente 
 
-    print(f"[TCP] Servidor escuchando en {HOST}:{PORT}")
+    # Log de inicio del servidor
+    logging.info(f"Servidor TCP iniciado y escuchando en {HOST}:{PORT}")
 
     try:
         while True:
@@ -152,10 +179,11 @@ def main():
                 pass  
 
     except KeyboardInterrupt: #captura la interrupcion del teclado (Ctrl+C) para cerrar el servidor limpiamente
-        print("\nCerrando servidor...")
+       logging.info("Interrupción por teclado detectada. Deteniendo servidor...")
     finally:
         """"Cierra el socket del servidor al terminar"""
         server.close()
+        logging.info("Servidor cerrado de forma segura.")
 
 
 if __name__ == "__main__":

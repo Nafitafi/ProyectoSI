@@ -9,12 +9,11 @@ import time
 import threading
 import datetime
 from cliente_tcp import ClienteTCP
-from cliente_udp import ClienteUDP
 
 
 # CONFIGURACIÓN VISUAL DE LA APLICACIÓN WEB
 st.set_page_config(
-    page_title="Chat TCP/UDP", 
+    page_title="Chat TCP", 
     page_icon="💬",
     layout="wide"
 )
@@ -30,7 +29,6 @@ st.set_page_config(
 # st.session_state.cliente_obj guarda el objeto cliente (TCP o UDP) para usarlo en otras partes de la aplicacion
 # st.session_state.historial es una lista que almacena los mensajes recibidos para mostrarlos en la interfaz
 # st.session_state.conectado indica si el usuario esta conectado al servidor
-# st.session_state.tipo_conexion guarda el tipo de conexion (TCP o UDP) para mostrarlo en la interfaz
 # st.session_state.nombre_usuario guarda el nombre de usuario ingresado por el usuario
 # st.session_state.usuarios es una lista que almacena los nombres de los usuarios conectados
 
@@ -41,8 +39,6 @@ if 'historial' not in st.session_state:
     st.session_state.historial = []
 if 'conectado' not in st.session_state:
     st.session_state.conectado = False
-if 'tipo_conexion' not in st.session_state:
-    st.session_state.tipo_conexion = ""
 if 'nombre_usuario' not in st.session_state:
     st.session_state.nombre_usuario = ""
 if 'usuarios' not in st.session_state:
@@ -126,7 +122,6 @@ def hilo_escucha(cliente_instancia, lista_mensajes_referencia, lista_usuarios_re
 # - st.session_state se usa para mantener el estado de la aplicacion entre interacciones del usuario
 # - st.session_state.cliente_obj = cliente guarda el objeto cliente (TCP o UDP) para usarlo en otras partes de la aplicacion
 # - st.session_state.conectado indica si el usuario esta conectado al servidor
-# - st.session_state.tipo_conexion guarda el tipo de conexion (TCP o UDP) para mostrarlo en la interfaz
 # - st.session_state.nombre_usuario guarda el nombre de usuario ingresado por el usuario
 # - iniciarHiloEscucha es un hilo que ejecuta la funcion hilo_escucha en segundo plano para recibir mensajes del servidor sin bloquear la interfaz de usuario
 # - st.rerun() se usa para refrescar la interfaz de usuario despues de conectarse o desconectarse
@@ -144,13 +139,8 @@ with st.sidebar:
             if nombre_input:
                 st.session_state.nombre_usuario = nombre_input
                 
-                # Instanciamos la clase correcta
-                if protocolo == "TCP":
-                    cliente = ClienteTCP()
-                    st.session_state.tipo_conexion = "TCP"
-                else:
-                    cliente = ClienteUDP()
-                    st.session_state.tipo_conexion = "UDP"
+                # Instanciamos solo el cliente TCP
+                cliente = ClienteTCP()
 
                 # Conectamos
                 exito, info = cliente.conectar(nombre_input)
@@ -181,11 +171,11 @@ with st.sidebar:
             else:
                 st.warning("El nombre es obligatorio.")
                 
-        st.info("Asegúrate de correr `servidores.py` primero.")
+        st.info("Asegúrate de el servidor primero.")
         
     else:
         st.success(f"🟢 En línea como **{st.session_state.nombre_usuario}**")
-        st.write(f"Protocolo: **{st.session_state.tipo_conexion}**")
+        st.write(f"Protocolo: **TCP**")
         
         st.markdown("---")
         st.caption("Comandos especiales:")
@@ -206,7 +196,7 @@ with st.sidebar:
 # - col_msg, col_users = st.columns([3, 1]) crea dos columnas, una para los mensajes y otra para la lista de usuarios conectados
 # - contenedor_mensajes = st.container(height=500) crea un contenedor para mostrar los mensajes con una altura fija
 # - st.chat_input crea un campo de entrada para que el usuario escriba mensajes
-st.title(f"Sala de Chat {st.session_state.tipo_conexion}")
+st.title(f"Sala de Chat TCP - Usuario: {st.session_state.nombre_usuario if st.session_state.conectado else 'No conectado'}")
 
 # Mostrar mensajes y lista de usuarios conectados en dos columnas
 col_msg, col_users = st.columns([3, 1])
