@@ -7,7 +7,6 @@ import server_tcp
 def main():
     print("Iniciando servidor TCP...\nPresiona CTRL+C para detener.")
     try:
-        # Llama a la función principal de tu servidor TCP directamente
         server_tcp.main()
     except KeyboardInterrupt:
         print("\nCerrando servidor...")

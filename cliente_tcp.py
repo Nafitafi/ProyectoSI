@@ -14,7 +14,7 @@ import re
 SERVER_IP = "127.0.0.1"
 SERVER_PORT = 5000
 
-# Reglas de validación (deben coincidir con las del servidor)
+# Reglas de validación 
 NOMBRE_MIN = 3
 NOMBRE_MAX = 20
 PASS_MIN   = 4

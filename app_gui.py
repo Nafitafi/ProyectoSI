@@ -12,7 +12,7 @@ import datetime
 import re
 from cliente_tcp import ClienteTCP
 
-# Reglas de validacion (deben coincidir con las del servidor)
+# Reglas de validacion 
 NOMBRE_MIN = 3
 NOMBRE_MAX = 20
 PASS_MIN   = 4
@@ -105,15 +105,7 @@ if 'dialogo_mostrado_ts' not in st.session_state:
 # st.session_state directamente dentro del hilo, ya que esto puede causar errores de
 # contexto en Streamlit. Recibimos las referencias como argumentos explícitos.
 def hilo_escucha(cliente_instancia, lista_mensajes_referencia, lista_usuarios_referencia):
-    """
-    Escucha mensajes entrantes. 
-    NO usa st.session_state directamente para evitar errores de contexto.
-    Este bloque detecta cuando un usuario *entra* o *sale* del chat. El servidor a veces manda mensajes como:*** usuario se unio al chat ***
-    La idea es:
-    1. Revisar si el mensaje contiene "se unio al chat" o "salio del chat"
-    2. Separar el mensaje usando "***" para obtener el nombre del usuario
-    3. Agregarlo a la lista de usuarios si se unió, o quitarlo de la lista si salió
-    """
+  
     # Usamos la propiedad .conectado del objeto cliente
     while cliente_instancia.conectado:
         try:
@@ -172,8 +164,7 @@ def hilo_escucha(cliente_instancia, lista_mensajes_referencia, lista_usuarios_re
 
 
 def desconectar():
-    """Cierra la conexion del cliente y limpia todas las variables de sesion,
-    incluyendo las relacionadas al timer de inactividad para que queden en su estado inicial"""
+    
     if st.session_state.cliente_obj:
         st.session_state.cliente_obj.cerrar() #cierra el socket del cliente TCP
     st.session_state.conectado = False
