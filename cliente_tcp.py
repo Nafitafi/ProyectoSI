@@ -9,12 +9,13 @@ la envia cifrada con RSA de modo que nunca viaja en texto plano por la red.
 import socket
 import threading
 import rsa
+import struct
 import re
 
 SERVER_IP = "127.0.0.1"
 SERVER_PORT = 5000
 
-# Reglas de validación 
+# Reglas de validación (deben coincidir con las del servidor)
 NOMBRE_MIN = 3
 NOMBRE_MAX = 20
 PASS_MIN   = 4
@@ -22,8 +23,7 @@ PASS_MAX   = 50
 NOMBRE_REGEX = re.compile(r'^[a-zA-Z0-9_\-]+$')
 
 def validar_nombre(nombre):
-    """Valida longitud y caracteres permitidos del nombre de usuario.
-    Devuelve (True, None) si es válido o (False, mensaje_error) si no lo es."""
+    """Valida longitud y caracteres permitidos del nombre de usuario."""
     if not nombre:
         return False, "El nombre de usuario no puede estar vacío"
     if len(nombre) < NOMBRE_MIN:
@@ -35,8 +35,7 @@ def validar_nombre(nombre):
     return True, None
 
 def validar_contrasena(contrasena):
-    """Valida longitud de la contraseña.
-    Devuelve (True, None) si es válida o (False, mensaje_error) si no lo es."""
+    """Valida longitud de la contraseña."""
     if not contrasena:
         return False, "La contraseña no puede estar vacía"
     if len(contrasena) < PASS_MIN:
@@ -44,6 +43,30 @@ def validar_contrasena(contrasena):
     if len(contrasena) > PASS_MAX:
         return False, f"La contraseña no puede superar {PASS_MAX} caracteres"
     return True, None
+
+def recibir_exacto(sock, n):
+    """Lee exactamente n bytes del socket, bloqueante."""
+    datos = b""
+    while len(datos) < n:
+        paquete = sock.recv(n - len(datos))
+        if not paquete:
+            return None
+        datos += paquete
+    return datos
+
+def recibir_con_longitud(sock):
+    """Lee 4 bytes de longitud y luego el mensaje completo.
+    Evita el problema de TCP que fusiona mensajes consecutivos."""
+    header = recibir_exacto(sock, 4)
+    if header is None:
+        return None
+    longitud = struct.unpack('>I', header)[0]
+    return recibir_exacto(sock, longitud)
+
+def enviar_con_longitud(sock, datos_bytes):
+    """Envía datos precedidos de 4 bytes de longitud."""
+    longitud = struct.pack('>I', len(datos_bytes))
+    sock.sendall(longitud + datos_bytes)
 
 """Clase ClienteTCP maneja la conexion TCP con el servidor, envio y recepcion de mensajes. se trata como objeto ya que
 permite manejar mejor la conexion y sus estados, asi hay un solo socket por cliente y se puede reutilizar el objeto para
@@ -61,39 +84,38 @@ class ClienteTCP: #Clase para manejar la conexion TCP con el servidor
     def conectar(self, nombre_usuario, contrasena):
         """Conecta al socket y realiza el handshake inicial de nombre y contraseña.
         Devuelve (True, mensaje) si fue exitoso o (False, error) si fallo.
-        La contraseña se envia cifrada con la clave publica del servidor para que
-        solo el servidor pueda descifrarla con su clave privada"""
+        Usa protocolo longitud+datos para que TCP no fusione mensajes consecutivos."""
         try:
             self.sock.connect((SERVER_IP, SERVER_PORT))
             
-            # Recibir llave pública del servidor
-            server_pub_pem = self.sock.recv(2048)
+            # Recibir llave pública del servidor (sin protocolo de longitud, es el primer envío)
+            server_pub_pem = self.sock.recv(4096)
             self.server_pubkey = rsa.PublicKey.load_pkcs1(server_pub_pem)
             
             # Enviar nuestra llave pública al servidor
             self.sock.sendall(self.pubkey.save_pkcs1())
             
-            # Recibir el prompt "Usuario: " (viene cifrado) y descifrarlo
-            prompt_cifrado = self.sock.recv(2048)
-            rsa.decrypt(prompt_cifrado, self.privkey).decode('utf-8') # "Usuario: "
+            # Recibir prompt "Usuario: " con protocolo longitud+datos
+            prompt_cifrado = recibir_con_longitud(self.sock)
+            rsa.decrypt(prompt_cifrado, self.privkey).decode('utf-8')
             
-            # Enviar nuestro nombre de usuario CIFRADO al servidor
+            # Enviar nombre cifrado con protocolo longitud+datos
             nombre_cifrado = rsa.encrypt(nombre_usuario.encode('utf-8'), self.server_pubkey)
-            self.sock.sendall(nombre_cifrado)
+            enviar_con_longitud(self.sock, nombre_cifrado)
 
-            # Recibir el prompt "Contrasena: " (viene cifrado) y descifrarlo
-            prompt_pass_cifrado = self.sock.recv(2048)
-            rsa.decrypt(prompt_pass_cifrado, self.privkey).decode('utf-8') # "Contrasena: "
+            # Recibir prompt "Contrasena: " con protocolo longitud+datos
+            prompt_pass_cifrado = recibir_con_longitud(self.sock)
+            rsa.decrypt(prompt_pass_cifrado, self.privkey).decode('utf-8')
 
-            # Enviar la contraseña CIFRADA al servidor para que solo el servidor pueda descifrarla
-            pass_cifrado = rsa.encrypt(contrasena.encode('utf-8'), self.server_pubkey) #cifra la contraseña con la llave publica del servidor
-            self.sock.sendall(pass_cifrado) #envia la contraseña cifrada al servidor
+            # Enviar contraseña cifrada con protocolo longitud+datos
+            pass_cifrado = rsa.encrypt(contrasena.encode('utf-8'), self.server_pubkey)
+            enviar_con_longitud(self.sock, pass_cifrado)
 
-            # Leer la respuesta de autenticacion del servidor (AUTH_OK o ERROR)
-            resp_cifrado = self.sock.recv(2048) #recibe la respuesta cifrada con nuestra llave publica
-            resp = rsa.decrypt(resp_cifrado, self.privkey).decode('utf-8').strip() #descifra la respuesta con nuestra llave privada
+            # Leer respuesta AUTH_OK o ERROR con protocolo longitud+datos
+            resp_cifrado = recibir_con_longitud(self.sock)
+            resp = rsa.decrypt(resp_cifrado, self.privkey).decode('utf-8').strip()
 
-            if resp.startswith("ERROR"): #si la respuesta es un error, se cierra la conexion y se retorna el error
+            if resp.startswith("ERROR"):
                 self.sock.close()
                 return False, resp
             
@@ -107,28 +129,27 @@ class ClienteTCP: #Clase para manejar la conexion TCP con el servidor
     def enviar_mensaje(self, mensaje):
         if self.conectado:
             try:
-                mensaje_cifrado = rsa.encrypt(mensaje.encode('utf-8'), self.server_pubkey) #cifra el mensaje usando la clave publica del servidor para que solo el servidor pueda descifrarlo con su clave privada
-                self.sock.sendall(mensaje_cifrado) #envia el mensaje cifrado al servidor
+                mensaje_cifrado = rsa.encrypt(mensaje.encode('utf-8'), self.server_pubkey)
+                enviar_con_longitud(self.sock, mensaje_cifrado)
             except OverflowError:
-                print("Error: El mensaje es demasiado largo para ser cifrado con RSA 2048 bits.") #RSA tiene un limite de tamaño para los mensajes que puede cifrar, si el mensaje es demasiado largo se lanza esta excepcion.
+                print("Error: El mensaje es demasiado largo para ser cifrado con RSA 2048 bits.")
             except Exception as e:
                 print(f"Error enviando: {e}")
 
     """metodo para recibir mensajes del servidor TCP usando el socket creado en el init"""
     def recibir_mensaje(self):
-        """Intenta recibir mensajes. Retorna el mensaje o None si falla."""
+        """Recibe un mensaje completo usando protocolo longitud+datos.
+        Garantiza que cada llamada devuelve exactamente un mensaje, sin fusiones de TCP."""
         if self.conectado:
             try:
-                msg_cifrado = self.sock.recv(4096) 
+                msg_cifrado = recibir_con_longitud(self.sock)
                 if not msg_cifrado:
                     self.cerrar()
                     return None
-                
-                # Desciframos usando nuestra llave privada
                 msg_plano = rsa.decrypt(msg_cifrado, self.privkey).decode('utf-8')
                 return msg_plano
             except:
-                return None #no envia nada si falla
+                return None
         return None
 
     def cerrar(self): #cierra la conexion del cliente TCP
@@ -163,10 +184,10 @@ def main():
         print(f"Error: {pass_err}")
         return
 
-    # Solo se crea el socket si los datos son validos, evitando conexiones innecesarias
+    # Solo se crea el socket si los datos son validos
     cliente = ClienteTCP()
 
-    exito, info = cliente.conectar(nombre, contrasena) #conecta al servidor con nombre y contrasena
+    exito, info = cliente.conectar(nombre, contrasena)
     if not exito: #si hubo un error en la conexion o autenticacion se imprime el error y se termina
         print(f"Error: {info}")
         return

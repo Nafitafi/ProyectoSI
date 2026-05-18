@@ -61,44 +61,18 @@ def hash_sha256(texto):
     return hashlib.sha256(texto.encode('utf-8')).hexdigest()
 
 
-import re
-
-NOMBRE_MIN = 3
-NOMBRE_MAX = 20
-PASS_MIN   = 4
-PASS_MAX   = 50
-# Solo letras, números, guión bajo y guión medio; sin espacios ni caracteres especiales
-NOMBRE_REGEX = re.compile(r'^[a-zA-Z0-9_\-]+$')
-
-def validar_nombre(nombre):
-    """Valida longitud y caracteres permitidos del nombre de usuario.
-    Devuelve (True, None) si es válido o (False, mensaje_error) si no lo es."""
-    if not nombre:
-        return False, "ERROR: El nombre de usuario no puede estar vacio"
-    if len(nombre) < NOMBRE_MIN:
-        return False, f"ERROR: El nombre debe tener al menos {NOMBRE_MIN} caracteres"
-    if len(nombre) > NOMBRE_MAX:
-        return False, f"ERROR: El nombre no puede superar {NOMBRE_MAX} caracteres"
-    if not NOMBRE_REGEX.match(nombre):
-        return False, "ERROR: El nombre solo puede contener letras, numeros, _ y -"
-    return True, None
-
-def validar_contrasena(contrasena):
-    """Valida longitud de la contraseña; no se restringen caracteres especiales
-    porque en una contraseña son bienvenidos para mayor seguridad.
-    Devuelve (True, None) si es válida o (False, mensaje_error) si no lo es."""
-    if not contrasena:
-        return False, "ERROR: La contrasena no puede estar vacia"
-    if len(contrasena) < PASS_MIN:
-        return False, f"ERROR: La contrasena debe tener al menos {PASS_MIN} caracteres"
-    if len(contrasena) > PASS_MAX:
-        return False, f"ERROR: La contrasena no puede superar {PASS_MAX} caracteres"
-    return True, None
-
-
 """remitente contiene el nombre del usuario que envió el mensaje
 Es opcional. Si es None, el mensaje se envía a todos, si tiene valor se excluye al remitente
 """
+def enviar_con_longitud(conn, datos_bytes):
+    """Envia datos precedidos de 4 bytes que indican su longitud.
+    Esto evita que TCP fusione dos mensajes cifrados en un solo paquete,
+    lo que causaria errores al descifrar con RSA."""
+    import struct
+    longitud = struct.pack('>I', len(datos_bytes))  # 4 bytes big-endian
+    conn.sendall(longitud + datos_bytes)
+
+
 def broadcast(mensaje, remitente=None):
     """Envia un mensaje a todos los clientes conectados, excepto al remitente si se especifica, 
     de forma que itera sobre el diccionario de clientes y envia el mensaje a cada uno
@@ -109,10 +83,29 @@ def broadcast(mensaje, remitente=None):
         if nombre != remitente:
             try:
                 mensaje_cifrado = rsa.encrypt(mensaje.encode('utf-8'), datos_cliente['pubkey']) #cifra el mensaje usando la clave publica del cliente destino
-                datos_cliente['conn'].sendall(mensaje_cifrado)
+                enviar_con_longitud(datos_cliente['conn'], mensaje_cifrado)
             except Exception as e:
                 logging.warning(f"Fallo al enviar mensaje a '{nombre}': {e}")
 
+
+import struct
+
+def _recibir_exacto(s, n):
+    """Lee exactamente n bytes del socket."""
+    datos = b""
+    while len(datos) < n:
+        p = s.recv(n - len(datos))
+        if not p:
+            return None
+        datos += p
+    return datos
+
+def _recv_con_longitud(s):
+    """Lee 4 bytes de longitud y luego el mensaje completo."""
+    h = _recibir_exacto(s, 4)
+    if h is None:
+        return None
+    return _recibir_exacto(s, struct.unpack(">I", h)[0])
 
 def manejarCliente(conn, addr):
     """Maneja la comunicacion con un cliente conectado, registra el nombre de usuario,
@@ -130,40 +123,21 @@ def manejarCliente(conn, addr):
  
         # Pedir el usuario, para enviar el prompt cifrado con la llave del cliente
         prompt_cifrado = rsa.encrypt(b"Usuario: ", client_pub_key) #cifra el prompt usando la clave publica del cliente para que solo el cliente pueda descifrarlo
-        conn.sendall(prompt_cifrado) #envia el prompt cifrado al cliente para solicitar el nombre de usuario
+        enviar_con_longitud(conn, prompt_cifrado) #envia el prompt cifrado al cliente para solicitar el nombre de usuario
  
         # Recibir el nombre de usuario (viene cifrado por el cliente) y descifrarlo
-        nombre_cifrado = conn.recv(2048) #recibe el nombre cifrado por el cliente
+        nombre_cifrado = _recv_con_longitud(conn)
         # descifra el nombre usando la clave privada del servidor y lo decodifica a string, ademas se le quitan espacios en blanco al inicio y final por si el cliente los ingreso por error
         nombre = rsa.decrypt(nombre_cifrado, SERVER_PRIV_KEY).decode('utf-8').strip()
-
-        # Validar nombre antes de continuar con el flujo de autenticacion
-        nombre_ok, nombre_err = validar_nombre(nombre)
-        if not nombre_ok:
-            error_cifrado = rsa.encrypt(nombre_err.encode('utf-8'), client_pub_key)
-            conn.sendall(error_cifrado)
-            logging.warning(f"Conexion rechazada desde {addr}: nombre invalido '{nombre}' - {nombre_err}")
-            conn.close()
-            return
-
+ 
         # Pedir la contraseña, tambien cifrada con la llave publica del cliente para que solo el cliente pueda verla
         prompt_pass_cifrado = rsa.encrypt(b"Contrasena: ", client_pub_key) #cifra el prompt de contraseña con la llave publica del cliente
-        conn.sendall(prompt_pass_cifrado) #envia el prompt de contraseña cifrado al cliente
+        enviar_con_longitud(conn, prompt_pass_cifrado) #envia el prompt de contraseña cifrado al cliente
  
         # Recibir la contraseña (viene cifrada por el cliente) y descifrarla
-        pass_cifrado = conn.recv(2048) #recibe la contraseña cifrada enviada por el cliente
-        contrasena = rsa.decrypt(pass_cifrado, SERVER_PRIV_KEY).decode('utf-8').strip()
-
-        # Validar contraseña antes de hashearla o compararla
-        pass_ok, pass_err = validar_contrasena(contrasena)
-        if not pass_ok:
-            error_cifrado = rsa.encrypt(pass_err.encode('utf-8'), client_pub_key)
-            conn.sendall(error_cifrado)
-            logging.warning(f"Conexion rechazada desde {addr}: contrasena invalida para '{nombre}' - {pass_err}")
-            conn.close()
-            return
-
-        contrasena_hash = hash_sha256(contrasena)
+        pass_cifrado = _recv_con_longitud(conn)
+        contrasena = rsa.decrypt(pass_cifrado, SERVER_PRIV_KEY).decode('utf-8').strip() #descifra la contraseña usando la clave privada del servidor
+        contrasena_hash = hash_sha256(contrasena) #convierte la contraseña a su hash SHA-256 antes de guardarla o compararla, la contraseña en texto plano nunca se almacena
  
         with lock:
             """with lock bloquea el acceso para evitar conflictos entre los hilos, despues se verifica
@@ -178,7 +152,7 @@ def manejarCliente(conn, addr):
             if nombre in clientes:
                 # el usuario ya tiene una sesion activa en este momento, no se permite doble conexion
                 error_msg = rsa.encrypt(b"ERROR: Usuario ya conectado\n", client_pub_key) #cifra el error con la llave del cliente
-                conn.sendall(error_msg)
+                enviar_con_longitud(conn, error_msg)
                 logging.warning(f"Conexión rechazada desde {addr}: El nombre '{nombre}' ya está activo.")
                 conn.close()
                 return
@@ -186,22 +160,20 @@ def manejarCliente(conn, addr):
             if nombre in usuarios_registrados:
                 """el usuario ya existe en el diccionario de registrados, se valida que la contraseña
                 ingresada coincida con el hash guardado comparando hash con hash, si no coinciden se rechaza"""
-                print(f"[HASH] Hash recibido:  {contrasena_hash}")
-                print(f"[HASH] Hash guardado:  {usuarios_registrados[nombre]}")
                 if usuarios_registrados[nombre] != contrasena_hash: #compara el hash de la contraseña ingresada con el hash guardado
                     error_auth = rsa.encrypt(b"ERROR: Contrasena incorrecta\n", client_pub_key) #cifra el mensaje de error con la llave del cliente
-                    conn.sendall(error_auth) #envia el error al cliente
+                    enviar_con_longitud(conn, error_auth) #envia el error al cliente
                     logging.warning(f"Login fallido para '{nombre}' desde {addr}: contraseña incorrecta")
                     conn.close()
                     return
                 # contraseña correcta, se autoriza el acceso al chat
-                conn.sendall(rsa.encrypt(b"AUTH_OK\n", client_pub_key)) #notifica al cliente que la autenticacion fue exitosa
+                enviar_con_longitud(conn, rsa.encrypt(b"AUTH_OK\n", client_pub_key)) #notifica al cliente que la autenticacion fue exitosa
                 logging.info(f"Usuario '{nombre}' autenticado correctamente desde {addr}")
             else:
                 """el usuario es nuevo, se guarda su nombre y el hash SHA-256 de su contraseña en el diccionario
                 usuarios_registrados para que en futuras conexiones se pueda validar su contraseña"""
                 usuarios_registrados[nombre] = contrasena_hash #guarda el hash SHA-256, nunca la contraseña en texto plano
-                conn.sendall(rsa.encrypt(b"AUTH_OK\n", client_pub_key)) #notifica al cliente que el registro fue exitoso
+                enviar_con_longitud(conn, rsa.encrypt(b"AUTH_OK\n", client_pub_key)) #notifica al cliente que el registro fue exitoso
                 logging.info(f"Usuario '{nombre}' registrado en memoria (hash SHA-256) desde {addr}")
  
             # Agregar cliente al diccionario de conexiones activas con su conexion y clave publica
@@ -213,7 +185,7 @@ def manejarCliente(conn, addr):
                     try:
                         msg_sistema = f"SISTEMA_ADD:{user}\n"
                         msg_cifrado = rsa.encrypt(msg_sistema.encode('utf-8'), client_pub_key)
-                        conn.sendall(msg_cifrado)
+                        enviar_con_longitud(conn, msg_cifrado)
                     except:
                         pass
                     
@@ -230,7 +202,7 @@ def manejarCliente(conn, addr):
         while True:
             """Bucle principal para recibir mensajes del cliente, espera mensajes del cliente y si
             el mensaje esta vacio significa que se desconecto, si hay algun error al recibir, se sale del ciclo"""
-            msg_cifrado = conn.recv(2048)
+            msg_cifrado = _recv_con_longitud(conn)
             if not msg_cifrado:
                 break
  
@@ -249,15 +221,15 @@ def manejarCliente(conn, addr):
                 if destino in clientes:
                     destino_pubkey = clientes[destino]['pubkey'] #obtiene la clave publica del cliente destino para cifrar el mensaje privado
                     msg_para_destino = f"[{fecha}] [PRIVADO de {nombre}] {contenido}\n" #mensaje que recibira el cliente destino, incluye la fecha, el nombre del remitente y el mensaje
-                    clientes[destino]['conn'].sendall(rsa.encrypt(msg_para_destino.encode('utf-8'), destino_pubkey)) #envia el mensaje cifrado al cliente destino usando su clave publica para que solo el cliente destino pueda descifrarlo
+                    enviar_con_longitud(clientes[destino]['conn'], rsa.encrypt(msg_para_destino.encode('utf-8'), destino_pubkey)) #envia el mensaje cifrado al cliente destino usando su clave publica para que solo el cliente destino pueda descifrarlo
                     
                     msg_para_remitente = f"[PRIVADO para {destino}] [Fecha:{fecha}] {contenido}\n" 
-                    conn.sendall(rsa.encrypt(msg_para_remitente.encode('utf-8'), client_pub_key)) #envia la confirmacion al remitente cifrada con su clave publica para que solo el remitente pueda descifrarla
+                    enviar_con_longitud(conn, rsa.encrypt(msg_para_remitente.encode('utf-8'), client_pub_key)) #envia la confirmacion al remitente cifrada con su clave publica para que solo el remitente pueda descifrarla
                     
                     logging.info(f"Mensaje privado de '{nombre}' a '{destino}': ***Cifrado***") #registramos el evento del mensaje privado sin guardar el contenido por seguridad
                 else:
                     err = rsa.encrypt(b"ERROR: Usuario no encontrado\n", client_pub_key) #cifra el mensaje de error usando la clave publica del remitente para que solo el remitente pueda descifrarlo
-                    conn.sendall(err) #envia el mensaje de error al remitente
+                    enviar_con_longitud(conn, err) #envia el mensaje de error al remitente
                     logging.warning(f"Intento de mensaje privado a '{destino}' fallido desde '{nombre}': Usuario no encontrado") #registramos el intento fallido de mensaje privado por usuario no encontrado
                 continue
  

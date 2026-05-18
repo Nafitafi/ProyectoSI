@@ -9,39 +9,7 @@ import streamlit as st
 import time
 import threading
 import datetime
-import re
 from cliente_tcp import ClienteTCP
-
-# Reglas de validacion 
-NOMBRE_MIN = 3
-NOMBRE_MAX = 20
-PASS_MIN   = 4
-PASS_MAX   = 50
-NOMBRE_REGEX = re.compile(r'^[a-zA-Z0-9_\-]+$')
-
-def validar_nombre(nombre):
-    #Valida longitud y caracteres permitidos del nombre de usuario.
-    #Devuelve (True, None) si es valido o (False, mensaje_error) si no lo es
-    if not nombre:
-        return False, "El nombre de usuario no puede estar vacio"
-    if len(nombre) < NOMBRE_MIN:
-        return False, f"El nombre debe tener al menos {NOMBRE_MIN} caracteres"
-    if len(nombre) > NOMBRE_MAX:
-        return False, f"El nombre no puede superar {NOMBRE_MAX} caracteres"
-    if not NOMBRE_REGEX.match(nombre):
-        return False, "El nombre solo puede contener letras, numeros, _ y -"
-    return True, None
-
-def validar_contrasena(contrasena):
-    #Valida longitud de la contrasena.
-    #Devuelve (True, None) si es valida o (False, mensaje_error) si no lo es
-    if not contrasena:
-        return False, "La contrasena no puede estar vacia"
-    if len(contrasena) < PASS_MIN:
-        return False, f"La contrasena debe tener al menos {PASS_MIN} caracteres"
-    if len(contrasena) > PASS_MAX:
-        return False, f"La contrasena no puede superar {PASS_MAX} caracteres"
-    return True, None
 
 
 # CONFIGURACIÓN VISUAL DE LA APLICACIÓN WEB
@@ -105,7 +73,7 @@ if 'dialogo_mostrado_ts' not in st.session_state:
 # st.session_state directamente dentro del hilo, ya que esto puede causar errores de
 # contexto en Streamlit. Recibimos las referencias como argumentos explícitos.
 def hilo_escucha(cliente_instancia, lista_mensajes_referencia, lista_usuarios_referencia):
-  
+   
     # Usamos la propiedad .conectado del objeto cliente
     while cliente_instancia.conectado:
         try:
@@ -117,41 +85,20 @@ def hilo_escucha(cliente_instancia, lista_mensajes_referencia, lista_usuarios_re
 
                 # Detectar mensajes del sistema que gestionan usuarios
                 if mensaje.startswith("SISTEMA_ADD:"):
+                    # Mensaje de sistema: agregar usuario a la lista (no va al historial de chat)
                     user = mensaje.replace("SISTEMA_ADD:", "").strip()
                     if user and user not in lista_usuarios_referencia:
                         lista_usuarios_referencia.append(user)
                 elif mensaje.startswith("SISTEMA_DEL:"):
+                    # Mensaje de sistema: quitar usuario de la lista (no va al historial de chat)
                     user = mensaje.replace("SISTEMA_DEL:", "").strip()
                     if user and user in lista_usuarios_referencia:
                         try:
                             lista_usuarios_referencia.remove(user)
                         except ValueError:
                             pass
-
                 else:
-                    # algunos servidores pueden enviar líneas tipo "*** usuario se unio al chat ***"
-                    if "se unio al chat" in mensaje and "***" in mensaje:
-                        parts = mensaje.split("***")
-                        if len(parts) >= 2:
-                            candidate = parts[1].strip()
-                            # candidate puede ser "usuario se unio al chat" 
-                            user = candidate.split()[0]
-                            if user and user not in lista_usuarios_referencia:
-                                #si el usuario no está en la lista, lo agregamos
-                                lista_usuarios_referencia.append(user)
-                    elif "salio del chat" in mensaje and "***" in mensaje:
-                        parts = mensaje.split("***")
-                        
-                        if len(parts) >= 2:
-                            candidate = parts[1].strip()
-                            user = candidate.split()[0]
-                            if user and user in lista_usuarios_referencia:
-                                try:
-                                    lista_usuarios_referencia.remove(user)
-                                except ValueError:
-                                    pass
-
-                    # Al ser una lista mutable, podemos hacer append y Streamlit lo verá
+                    # Mensaje normal de chat: va al historial
                     lista_mensajes_referencia.append(mensaje)
             else:
                 # Si retorna None, el servidor cerró o hubo error
@@ -164,7 +111,7 @@ def hilo_escucha(cliente_instancia, lista_mensajes_referencia, lista_usuarios_re
 
 
 def desconectar():
-    
+  
     if st.session_state.cliente_obj:
         st.session_state.cliente_obj.cerrar() #cierra el socket del cliente TCP
     st.session_state.conectado = False
@@ -204,48 +151,40 @@ with st.sidebar:
         #Botón de conectar
         if st.button("Conectar", type="primary"):
             if nombre_input and contrasena_input: #verifica que ambos campos esten llenos antes de intentar conectar
-                # Validar campos antes de intentar conectar al servidor
-                nombre_ok, nombre_err = validar_nombre(nombre_input)
-                pass_ok, pass_err = validar_contrasena(contrasena_input)
-
-                if not nombre_ok:
-                    st.error(f"Nombre invalido: {nombre_err}")
-                elif not pass_ok:
-                    st.error(f"Contrasena invalida: {pass_err}")
-                else:
-                    st.session_state.nombre_usuario = nombre_input
-
-                    # Instanciamos el cliente TCP solo si los datos son validos
-                    cliente = ClienteTCP()
-
-                    # Conectamos pasando nombre y contrasena
-                    exito, info = cliente.conectar(nombre_input, contrasena_input)
+                st.session_state.nombre_usuario = nombre_input
                 
-                    if exito:
-                        st.session_state.cliente_obj = cliente
-                        st.session_state.conectado = True
-                        st.session_state.ultimo_mensaje_ts = time.time() #inicia el timer de inactividad desde el momento de la conexion
-                        st.success(info)
+                # Instanciamos el cliente TCP
+                cliente = ClienteTCP()
 
-                        # Iniciamos el hilo de escucha
-                        # Pasamos los objetos EXPLICITAMENTE al hilo.
-                        iniciarHiloEscucha = threading.Thread(
-                            target=hilo_escucha,
-                            args=(
-                                st.session_state.cliente_obj,
-                                st.session_state.historial,
-                                st.session_state.usuarios,
-                            ),
-                            daemon=True,
-                        )
-                        iniciarHiloEscucha.start()
-
-                        time.sleep(0.5)
-                        st.rerun()
-                    else:
-                        st.error(f"Error: {info}")
+                # Conectamos pasando nombre y contraseña
+                exito, info = cliente.conectar(nombre_input, contrasena_input)
+                
+                if exito:
+                    st.session_state.cliente_obj = cliente
+                    st.session_state.conectado = True
+                    st.session_state.ultimo_mensaje_ts = time.time() #inicia el timer de inactividad desde el momento de la conexion
+                    st.success(info)
+                    
+                    # Iniciamos el hilo de escucha
+                    # Pasamos los objetos EXPLICITAMENTE al hilo.
+                    # Así el hilo no tiene que buscar 'st.session_state'
+                    iniciarHiloEscucha = threading.Thread(
+                        target=hilo_escucha,
+                        args=(
+                            st.session_state.cliente_obj,
+                            st.session_state.historial,
+                            st.session_state.usuarios,
+                        ),
+                        daemon=True,
+                    )
+                    iniciarHiloEscucha.start()
+                    
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error(f"Error: {info}")
             else:
-                st.warning("El nombre y la contrasena son obligatorios.")
+                st.warning("El nombre y la contraseña son obligatorios.")
                 
         st.info("Asegúrate de iniciar el servidor primero.")
         
@@ -276,13 +215,14 @@ st.title(f"Sala de Chat TCP - Usuario: {st.session_state.nombre_usuario if st.se
 # preguntando si desea seguir en el chat. El dialogo tiene un countdown de 15 segundos
 # (DIALOGO_SEGUNDOS) y si el tiempo se agota la sesion se cierra automaticamente.
 # Si el usuario responde "Si" se reinicia el timer. Si responde "No" se cierra la sesion.
-INACTIVIDAD_SEGUNDOS = 1 * 60  # minuto expresado en segundos
+INACTIVIDAD_SEGUNDOS = 5 * 60  # 5 minutos expresados en segundos
 DIALOGO_SEGUNDOS = 15           # segundos que el dialogo permanece activo antes de cerrar sesion
 
 if st.session_state.conectado:
     ahora = time.time() #obtiene el tiempo actual en segundos para compararlo con las marcas de tiempo guardadas
 
     if st.session_state.timer_dialogo_activo:
+       
         tiempo_transcurrido_dialogo = ahora - st.session_state.dialogo_mostrado_ts #segundos desde que aparecio el dialogo
         segundos_restantes = max(0, int(DIALOGO_SEGUNDOS - tiempo_transcurrido_dialogo)) #tiempo restante sin valores negativos
 
@@ -317,7 +257,7 @@ if st.session_state.conectado:
             st.markdown("---")
 
     else:
-        
+      
         if st.session_state.ultimo_mensaje_ts is not None:
             tiempo_inactivo = ahora - st.session_state.ultimo_mensaje_ts #segundos transcurridos desde el ultimo mensaje
             if tiempo_inactivo >= INACTIVIDAD_SEGUNDOS:
@@ -389,4 +329,5 @@ if st.session_state.conectado:
     st.rerun()
 
 else:
-    st.write("👈 Por favor, inicia sesión en el menú de la izquierda.")
+    if not st.session_state.nombre_usuario:
+        st.write("👈 Por favor, inicia sesión en el menú de la izquierda.")
