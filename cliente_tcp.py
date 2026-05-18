@@ -1,14 +1,53 @@
+"""Cliente TCP con cifrado RSA y autenticacion por contraseña.
+El servidor guarda la contraseña como hash SHA-256 en memoria, el cliente
+la envia cifrada con RSA de modo que nunca viaja en texto plano por la red.
+
+- import socket para crear el socket TCP de conexion al servidor
+- import threading para escuchar mensajes del servidor en un hilo separado
+- import rsa para el cifrado asimetrico de mensajes y contraseña
+"""
 import socket
 import threading
 import rsa
-
+import re
 
 SERVER_IP = "127.0.0.1"
 SERVER_PORT = 5000
 
+# Reglas de validación (deben coincidir con las del servidor)
+NOMBRE_MIN = 3
+NOMBRE_MAX = 20
+PASS_MIN   = 4
+PASS_MAX   = 50
+NOMBRE_REGEX = re.compile(r'^[a-zA-Z0-9_\-]+$')
+
+def validar_nombre(nombre):
+    """Valida longitud y caracteres permitidos del nombre de usuario.
+    Devuelve (True, None) si es válido o (False, mensaje_error) si no lo es."""
+    if not nombre:
+        return False, "El nombre de usuario no puede estar vacío"
+    if len(nombre) < NOMBRE_MIN:
+        return False, f"El nombre debe tener al menos {NOMBRE_MIN} caracteres"
+    if len(nombre) > NOMBRE_MAX:
+        return False, f"El nombre no puede superar {NOMBRE_MAX} caracteres"
+    if not NOMBRE_REGEX.match(nombre):
+        return False, "El nombre solo puede contener letras, números, _ y -"
+    return True, None
+
+def validar_contrasena(contrasena):
+    """Valida longitud de la contraseña.
+    Devuelve (True, None) si es válida o (False, mensaje_error) si no lo es."""
+    if not contrasena:
+        return False, "La contraseña no puede estar vacía"
+    if len(contrasena) < PASS_MIN:
+        return False, f"La contraseña debe tener al menos {PASS_MIN} caracteres"
+    if len(contrasena) > PASS_MAX:
+        return False, f"La contraseña no puede superar {PASS_MAX} caracteres"
+    return True, None
+
 """Clase ClienteTCP maneja la conexion TCP con el servidor, envio y recepcion de mensajes. se trata como objeto ya que
 permite manejar mejor la conexion y sus estados, asi hay un solo socket por cliente y se puede reutilizar el objeto para
-diferentes operacionees como conectar, enviar, recibir y cerrar la conexion
+diferentes operaciones como conectar, enviar, recibir y cerrar la conexion
 asi no se crean multiples sockets innecesarios, no hay errores de confusion entre sockets y se mantiene el estado de la conexion
 """
 class ClienteTCP: #Clase para manejar la conexion TCP con el servidor
@@ -19,8 +58,11 @@ class ClienteTCP: #Clase para manejar la conexion TCP con el servidor
         self.pubkey, self.privkey = rsa.newkeys(2048) #genera un par de claves RSA para este cliente, la clave publica se envia al servidor para que pueda cifrar mensajes privados para este cliente, y la clave privada se usa para descifrar mensajes privados recibidos del servidor
         self.server_pubkey = None #la clave publica del servidor se recibira al conectar y se guardara aqui para cifrar mensajes privados que se envien al servidor
 
-    def conectar(self, nombre_usuario):
-        """Conecta al socket y realiza el 'handshake' inicial del nombre."""
+    def conectar(self, nombre_usuario, contrasena):
+        """Conecta al socket y realiza el handshake inicial de nombre y contraseña.
+        Devuelve (True, mensaje) si fue exitoso o (False, error) si fallo.
+        La contraseña se envia cifrada con la clave publica del servidor para que
+        solo el servidor pueda descifrarla con su clave privada"""
         try:
             self.sock.connect((SERVER_IP, SERVER_PORT))
             
@@ -33,12 +75,29 @@ class ClienteTCP: #Clase para manejar la conexion TCP con el servidor
             
             # Recibir el prompt "Usuario: " (viene cifrado) y descifrarlo
             prompt_cifrado = self.sock.recv(2048)
-            prompt = rsa.decrypt(prompt_cifrado, self.privkey).decode('utf-8')
+            rsa.decrypt(prompt_cifrado, self.privkey).decode('utf-8') # "Usuario: "
             
             # Enviar nuestro nombre de usuario CIFRADO al servidor
             nombre_cifrado = rsa.encrypt(nombre_usuario.encode('utf-8'), self.server_pubkey)
             self.sock.sendall(nombre_cifrado)
+
+            # Recibir el prompt "Contrasena: " (viene cifrado) y descifrarlo
+            prompt_pass_cifrado = self.sock.recv(2048)
+            rsa.decrypt(prompt_pass_cifrado, self.privkey).decode('utf-8') # "Contrasena: "
+
+            # Enviar la contraseña CIFRADA al servidor para que solo el servidor pueda descifrarla
+            pass_cifrado = rsa.encrypt(contrasena.encode('utf-8'), self.server_pubkey) #cifra la contraseña con la llave publica del servidor
+            self.sock.sendall(pass_cifrado) #envia la contraseña cifrada al servidor
+
+            # Leer la respuesta de autenticacion del servidor (AUTH_OK o ERROR)
+            resp_cifrado = self.sock.recv(2048) #recibe la respuesta cifrada con nuestra llave publica
+            resp = rsa.decrypt(resp_cifrado, self.privkey).decode('utf-8').strip() #descifra la respuesta con nuestra llave privada
+
+            if resp.startswith("ERROR"): #si la respuesta es un error, se cierra la conexion y se retorna el error
+                self.sock.close()
+                return False, resp
             
+            # AUTH_OK: autenticacion exitosa, el cliente queda conectado
             self.conectado = True
             return True, "Conectado exitosamente (Canal Cifrado RSA)"
         except Exception as e:
@@ -73,7 +132,6 @@ class ClienteTCP: #Clase para manejar la conexion TCP con el servidor
         return None
 
     def cerrar(self): #cierra la conexion del cliente TCP
-        # Intentar notificar al servidor que nos vamos
         self.conectado = False
         try:
             self.sock.close()
@@ -93,25 +151,28 @@ def escucharServidor(cliente_obj):
 
 """Metodo main() para compatibilidad con menu.py y para ejecutar el cliente TCP de forma independiente"""
 def main():
-    cliente = ClienteTCP() #crea una instancia del cliente TCP, esto inicializa el socket y las claves RSA
-    
-    cliente.sock.connect((SERVER_IP, SERVER_PORT))  #conecta el socket al servidor TCP
-    
-    server_pub_pem = cliente.sock.recv(2048) #recibe la clave publica del servidor TCP en formato PEM, esta clave se usara para cifrar mensajes privados que se envien al servidor TCP
-    cliente.server_pubkey = rsa.PublicKey.load_pkcs1(server_pub_pem) #carga la clave publica del servidor en formato PEM a un objeto de clave RSA para usarlo en el cifrado
-    
-    cliente.sock.sendall(cliente.pubkey.save_pkcs1()) #envia la clave publica del cliente al servidor TCP, esto permite que el servidor pueda cifrar mensajes privados para este cliente usando esta clave
-    
-    prompt_cifrado = cliente.sock.recv(2048) #recibe el prompt "Usuario: " cifrado por el servidor TCP, este prompt se usara para pedir al usuario su nombre de usuario
-    banner = rsa.decrypt(prompt_cifrado, cliente.privkey).decode('utf-8') #descifra el prompt usando la clave privada del cliente.
-    nombre = input(banner) 
-    
-    nombre_cifrado = rsa.encrypt(nombre.encode('utf-8'), cliente.server_pubkey) #cifra el nombre de usuario usando la clave publica del servidor TCP para que solo el servidor pueda descifrarlo con su clave privada, esto es parte del "handshake" inicial para registrar el nombre de usuario en el servidor
-    cliente.sock.sendall(nombre_cifrado) #envia el nombre de usuario cifrado al servidor TCP para que el servidor pueda registrar este cliente con ese nombre de usuario
-    
-    cliente.conectado = True #marca el cliente como conectado, esto permite que el hilo de escucha del servidor se mantenga activo y pueda recibir mensajes del servidor de forma asíncrona
+    nombre = input("Usuario: ").strip()
+    nombre_ok, nombre_err = validar_nombre(nombre)
+    if not nombre_ok:
+        print(f"Error: {nombre_err}")
+        return
 
-    threading.Thread(target=escucharServidor, args=(cliente,), daemon=True).start() #inicia un hilo separado para escuchar mensajes del servidor TCP usando el metodo escucharServidor, esto permite que el cliente pueda recibir mensajes del servidor de forma asíncrona mientras el usuario sigue interactuando con la linea de comando para enviar mensajes
+    contrasena = input("Contrasena: ").strip()
+    pass_ok, pass_err = validar_contrasena(contrasena)
+    if not pass_ok:
+        print(f"Error: {pass_err}")
+        return
+
+    # Solo se crea el socket si los datos son validos, evitando conexiones innecesarias
+    cliente = ClienteTCP()
+
+    exito, info = cliente.conectar(nombre, contrasena) #conecta al servidor con nombre y contrasena
+    if not exito: #si hubo un error en la conexion o autenticacion se imprime el error y se termina
+        print(f"Error: {info}")
+        return
+
+    print(info) #imprime el mensaje de conexion exitosa
+    threading.Thread(target=escucharServidor, args=(cliente,), daemon=True).start() #inicia un hilo separado para escuchar mensajes del servidor TCP usando el metodo escucharServidor, esto permite que el cliente pueda recibir mensajes del servidor de forma asincrona mientras el usuario sigue interactuando con la linea de comando para enviar mensajes
 
     print("Comandos:\n /priv usuario mensaje\n /salir")
     while True:
@@ -123,4 +184,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
